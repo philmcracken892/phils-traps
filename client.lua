@@ -3,49 +3,255 @@ local ox_lib = exports.ox_lib
 local traps = {}
 local prompts = {}
 local capturedAnimals = {}
-local spawnedAnimals = {} 
+local spawnedAnimals = {}
 
+-- Configuration for player trapping
+Config.PlayerTrapSettings = {
+    Damage = 15,                     -- Base damage when caught in trap
+    RagdollDuration = 5000,          -- 5 seconds initial ragdoll
+    TrapDuration = 10000,            -- 10 seconds in trap
+    LimpDuration = 30000,            -- 30 seconds of limping after release
+    TrapChance = 80,                 -- Chance to trigger when stepped on (1-100)
+    UnfreezeAfterRagdoll = true,     -- Unfreeze after ragdoll
+    SoundEffect = "Bait_Steal_Large" -- Sound effect for player capture
+}
+
+-- Configuration for animal trapping
+Config.AnimalTrapSettings = {
+    CheckRadius = 2.0,               -- Radius to check for animals
+    CaptureChance = 80,              -- Default capture chance (overridden by bait-specific chances)
+    CaptureDuration = 1,            -- Default duration (overridden by trap-specific CaptureDuration)
+    
+}
+
+-- General configuration
+Config.InteractionDistance = 2.0      -- Distance for interacting with traps
+Config.AnimalsPerTrap = 1           -- Number of animals to spawn per trap
+Config.SpawnDelay = 2000             -- Delay between animal spawns (ms)
+Config.MinSpawnDistance = 5.0        -- Minimum distance for animal spawn
+Config.SpawnRadius = 15.0            -- Maximum distance for animal spawn
+Config.Prompts = {
+    Collect = "Collect Trap",
+    Check = "Check Trap"
+}
+
+-- Trap configuration
+Config.Traps = {
+    {
+        Item = 'beartrap',
+        Model = `s_beartrapanimated01x`, 
+        FallbackModel = `s_beartrapanimated01x`, 
+        Baits = {
+            { 
+                item = nil, 
+                animals = { 'a_c_bear_01', 'a_c_wolf_01', 'a_c_cougar_01' }, 
+                chance = 75 
+            },
+            { 
+                item = nil, 
+                animals = { 'a_c_fox_01', 'a_c_coyote_01', 'a_c_raccoon_01', 'a_c_boar_01' }, 
+                chance = 60 
+            },
+            { 
+                item = nil, 
+                animals = { 'a_c_deer_01', 'a_c_elk_01', 'a_c_pronghorn_01' }, 
+                chance = 50 
+            },
+            {
+                item = nil,
+                animals = { 'a_c_rabbit_01', 'a_c_squirrel_01', 'a_c_chipmunk_01' },
+                chance = 25
+            }
+        },
+        CaptureDuration = 20,
+        Damage = 90,
+        Animation = 'WORLD_HUMAN_CROUCH_INSPECT',
+        MaxCaptures = 3,
+        PlacementTime = 5000,
+        AnimalTrapAnimation = {
+            dict = "amb_creatures_mammal@pain",
+            anim = "pain_loop"
+        },
+        TrapAnimation = {
+            dict = "script_re@bear_trap",
+            open_anim = "bandage_dailog01_trap",
+            close_anim = "bandage_dailog02_trap"
+        }
+    }
+}
+
+local function MakePlayerLimp(ped, duration)
+    if not DoesEntityExist(ped) then return end
+    
+    -- Set injured state
+    Citizen.InvokeNative(0x59BD177A1A48600A, ped, 1)
+    
+    -- Reduce movement speed
+    SetPedMoveRateOverride(ped, 0.5)
+    
+    -- Disable sprint and jump
+    SetPedConfigFlag(ped, 43, true)  -- Disable melee
+    SetPedConfigFlag(ped, 4, true)   -- Disable jumping
+    
+    -- Reset after duration
+    SetTimeout(duration, function()
+        if DoesEntityExist(ped) then
+            Citizen.InvokeNative(0x59BD177A1A48600A, ped, 0)
+            SetPedConfigFlag(ped, 43, false)
+            SetPedConfigFlag(ped, 4, false)
+            SetPedMoveRateOverride(ped, 1.0)
+            
+            -- Notify player they've recovered
+            ox_lib:notify({
+                type = 'success',
+                title = 'Injury',
+                description = 'You have recovered from your injury',
+                duration = 5000
+            })
+        end
+    end)
+end
 
 local function IsAnimalPed(ped)
     local model = GetEntityModel(ped)
-    local knownAnimals = {
-        `a_c_wolf_01`,
-        `a_c_elk_01`,
-        `a_c_coyote_01`,
-        `a_c_bear_01`,
-        `a_c_fox_01`,
-        `a_c_rabbit_01`,
-        `a_c_cougar_01`,
-        `a_c_boar_01`,        
-        `a_c_raccoon_01`,     
-        `a_c_pronghorn_01`    
-    }
-    for _, animalHash in ipairs(knownAnimals) do
-        if model == animalHash then
-            return true
+    for _, trap in pairs(Config.Traps) do
+        for _, bait in pairs(trap.Baits) do
+            for _, animal in pairs(bait.animals) do
+                if model == GetHashKey(animal) then
+                    return true
+                end
+            end
         end
     end
     return false
 end
 
-
 local function GetRandomAnimalModel()
-    local knownAnimals = {
-        `a_c_wolf_01`,
-        `a_c_elk_01`,
-        `a_c_coyote_01`,
-        `a_c_bear_01`,
-        `a_c_fox_01`,
-        `a_c_rabbit_01`,
-        `a_c_cougar_01`,
-        `a_c_boar_01`,
-        `a_c_raccoon_01`,
-        `a_c_pronghorn_01`
-    }
-    return knownAnimals[math.random(1, #knownAnimals)]
+    local allAnimals = {}
+    for _, trap in pairs(Config.Traps) do
+        for _, bait in pairs(trap.Baits) do
+            for _, animal in pairs(bait.animals) do
+                if not allAnimals[animal] then
+                    allAnimals[animal] = true
+                    table.insert(allAnimals, GetHashKey(animal))
+                end
+            end
+        end
+    end
+    return allAnimals[math.random(1, #allAnimals)]
 end
 
+local function RagdollPlayer(ped, duration)
+    if not IsPedHuman(ped) then return end
+    
+    -- Force ragdoll
+    SetPedToRagdoll(ped, duration, duration, 0, true, true, false)
+    
+    
+    -- Visual effects
+    Citizen.InvokeNative(0x4102732DF6B4005F, "HitReaction", ped, 1.0)
+    Citizen.InvokeNative(0x59BD177A1A48600A, ped, 1)
+    
+    -- Temporary disable controls
+    DisableControlAction(0, 0x8FFC75D6, true) -- Disable sprint
+    DisableControlAction(0, 0x07CE1E61, true) -- Disable jump
+end
 
+local function CaptureAnimal(ped, trapId, trap)
+    if not DoesEntityExist(ped) or capturedAnimals[ped] then return end
+    
+    -- Increment capture count
+    traps[trapId].captureCount = (traps[trapId].captureCount or 0) + 1
+    
+    capturedAnimals[ped] = true
+    spawnedAnimals[ped] = nil
+    
+    -- Stop the animal's movement
+    ClearPedTasksImmediately(ped)
+    FreezeEntityPosition(ped, true)
+    
+    -- Play trap close animation
+    if trap.config.TrapAnimation then
+        RequestAnimDict(trap.config.TrapAnimation.dict)
+        local timeout = 0
+        while not HasAnimDictLoaded(trap.config.TrapAnimation.dict) and timeout < 1000 do
+            Wait(10)
+            timeout = timeout + 1
+        end
+        if HasAnimDictLoaded(trap.config.TrapAnimation.dict) then
+            TaskPlayAnim(trap.obj, trap.config.TrapAnimation.dict, trap.config.TrapAnimation.close_anim, 
+                        8.0, -8.0, -1, 0, 0, false, false, false)
+            RemoveAnimDict(trap.config.TrapAnimation.dict)
+        end
+    end
+    
+    -- Play animal trap animation if available
+    if trap.config.AnimalTrapAnimation then
+        RequestAnimDict(trap.config.AnimalTrapAnimation.dict)
+        local timeout = 0
+        while not HasAnimDictLoaded(trap.config.AnimalTrapAnimation.dict) and timeout < 1000 do
+            Wait(10)
+            timeout = timeout + 1
+        end
+        if HasAnimDictLoaded(trap.config.AnimalTrapAnimation.dict) then
+            TaskPlayAnim(ped, trap.config.AnimalTrapAnimation.dict, 
+                        trap.config.AnimalTrapAnimation.anim, 
+                        8.0, -8.0, -1, 1, 0, false, false, false)
+            RemoveAnimDict(trap.config.AnimalTrapAnimation.dict)
+        end
+    end
+    
+    -- Play trap sound
+    if trap.config.TrapSound then
+        Citizen.InvokeNative(0xCE5D0FFE8390B7FB, trap.obj, trap.config.TrapSound, 1.0, 0, 0, 0, 0)
+        -- Alternative: PlaySoundFrontend("trap_snap", "bear_trap_sounds", true, 0)
+    end
+    
+    -- Notify server
+    local entityId = trap.isNetworked and NetworkGetNetworkIdFromEntity(ped) or ped
+    TriggerServerEvent('rsg_beartraps:animalCaptured', trapId, GetEntityModel(ped), entityId)
+    
+    -- Kill animal immediately
+    if DoesEntityExist(ped) then
+        SetEntityHealth(ped, 0)
+        capturedAnimals[ped] = nil
+    end
+    
+    -- Reset trap to open animation after duration
+    SetTimeout(trap.config.CaptureDuration * 1000, function()
+        if DoesEntityExist(trap.obj) and trap.config.TrapAnimation then
+            RequestAnimDict(trap.config.TrapAnimation.dict)
+            local timeout = 0
+            while not HasAnimDictLoaded(trap.config.TrapAnimation.dict) and timeout < 1000 do
+                Wait(10)
+                timeout = timeout + 1
+            end
+            if HasAnimDictLoaded(trap.config.TrapAnimation.dict) then
+                TaskPlayAnim(trap.obj, trap.config.TrapAnimation.dict, trap.config.TrapAnimation.open_anim, 
+                            8.0, -8.0, -1, 1, 0, false, false, false)
+                RemoveAnimDict(trap.config.TrapAnimation.dict)
+            end
+        end
+        
+        -- Check if trap reached max captures
+        if traps[trapId] and traps[trapId].captureCount >= trap.config.MaxCaptures then
+            if DoesEntityExist(trap.obj) then
+                ClearPedTasks(trap.obj)
+                DeleteObject(trap.obj)
+            end
+            if prompts[trapId .. '_collect'] then
+                PromptDelete(prompts[trapId .. '_collect'])
+                prompts[trapId .. '_collect'] = nil
+            end
+            if prompts[trapId .. '_check'] then
+                PromptDelete(prompts[trapId .. '_check'])
+                prompts[trapId .. '_check'] = nil
+            end
+            TriggerServerEvent('rsg_beartraps:removeTrap', trapId)
+            traps[trapId] = nil
+        end
+    end)
+end
 local function FindSafeSpawnPosition(trapCoords, playerCoords, minDistance, maxDistance)
     local attempts = 0
     local maxAttempts = 50
@@ -56,7 +262,6 @@ local function FindSafeSpawnPosition(trapCoords, playerCoords, minDistance, maxD
         local spawnX = trapCoords.x + math.cos(angle) * radius
         local spawnY = trapCoords.y + math.sin(angle) * radius
         
-        
         local groundFound, groundZ = GetGroundZFor_3dCoord(spawnX, spawnY, trapCoords.z + 50.0, false)
         if not groundFound then
             groundFound, groundZ = GetGroundZFor_3dCoord(spawnX, spawnY, trapCoords.z + 10.0, false)
@@ -65,9 +270,7 @@ local function FindSafeSpawnPosition(trapCoords, playerCoords, minDistance, maxD
         local spawnZ = groundFound and groundZ + 1.0 or trapCoords.z + 1.0
         local spawnPos = vector3(spawnX, spawnY, spawnZ)
         
-       
         local distanceFromPlayer = #(spawnPos - playerCoords)
-        
         
         local hit, _, _, _, _ = GetShapeTestResult(StartShapeTestRay(spawnPos.x, spawnPos.y, spawnZ + 5.0, spawnPos.x, spawnPos.y, spawnZ - 2.0, -1, 0, 7))
         
@@ -78,47 +281,13 @@ local function FindSafeSpawnPosition(trapCoords, playerCoords, minDistance, maxD
         attempts = attempts + 1
     end
     
-    
     return vector3(trapCoords.x + minDistance, trapCoords.y + minDistance, trapCoords.z + 1.0), false
 end
 
 local function MakeAnimalMoveToTrap(animal, trapCoords, trapId)
     if not DoesEntityExist(animal) or IsPedHuman(animal) then return end
 
-    
-    local trapModel = `s_beartrapanimated01x`
-    local nearestTrap = nil
-    local shortestDistance = 55.0 
-    local animalCoords = GetEntityCoords(animal)
-
-    local handle, entity = FindFirstObject()
-    local success
-    repeat
-        if DoesEntityExist(entity) and GetEntityModel(entity) == trapModel then
-            local entCoords = GetEntityCoords(entity)
-            local dist = #(entCoords - animalCoords)
-            if dist < shortestDistance then
-                nearestTrap = entCoords
-                shortestDistance = dist
-            end
-        end
-        success, entity = FindNextObject(handle)
-    until not success
-    EndFindObject(handle)
-
-    
-    if nearestTrap then
-        trapCoords = nearestTrap
-        if Config.Debug then
-            
-        end
-    else
-        if Config.Debug then
-            
-        end
-    end
-
-   
+    -- Set animal behavior
     SetEntityAsMissionEntity(animal, true, true)
     Citizen.InvokeNative(0xE0AB82AAF3A9562E, animal, 1)
     SetBlockingOfNonTemporaryEvents(animal, true)
@@ -126,14 +295,17 @@ local function MakeAnimalMoveToTrap(animal, trapCoords, trapId)
     Citizen.InvokeNative(0x77FF8D35EEC6BBC4, animal, 0, false)
     Citizen.InvokeNative(0xFE07FF6495D52E2A, animal, 0, 0, 0)
 
-    
+    -- Configure combat attributes
     SetPedFleeAttributes(animal, 0, false)
     SetPedCombatAttributes(animal, 46, true)
     SetPedCanRagdoll(animal, false)
+    
+    -- Disable unnecessary behaviors
     SetPedCanPlayAmbientAnims(animal, false)
     SetPedCanPlayGestureAnims(animal, false)
     SetPedCanPlayAmbientBaseAnims(animal, false)
 
+    -- Important ped flags
     SetPedConfigFlag(animal, 6, true)
     SetPedConfigFlag(animal, 17, true)
     SetPedConfigFlag(animal, 43, true)
@@ -143,11 +315,14 @@ local function MakeAnimalMoveToTrap(animal, trapCoords, trapId)
     SetPedConfigFlag(animal, 297, true)
     SetPedConfigFlag(animal, 400, true)
 
+    -- Set relationship
     SetPedRelationshipGroupHash(animal, GetHashKey("REL_PLAYER_LIKE"))
     Citizen.InvokeNative(0x23F74C2FDA6E7C61, -1749618580, animal)
 
+    -- Clear tasks
     ClearPedTasksImmediately(animal)
 
+    -- Create movement task sequence
     local sequenceId = OpenSequenceTask(0)
     TaskGoToCoordAnyMeans(0, trapCoords.x, trapCoords.y, trapCoords.z, 1.5, 0, false, 786603, 0.1)
     TaskStandStill(0, 1000)
@@ -155,7 +330,7 @@ local function MakeAnimalMoveToTrap(animal, trapCoords, trapId)
     TaskPerformSequence(animal, sequenceId)
     ClearSequenceTask(sequenceId)
 
-    
+    -- Stuck detection thread
     CreateThread(function()
         local stuckTimer = 0
         local lastPos = GetEntityCoords(animal)
@@ -167,10 +342,7 @@ local function MakeAnimalMoveToTrap(animal, trapCoords, trapId)
             local currentPos = GetEntityCoords(animal)
             local distanceToTrap = #(currentPos - trapCoords)
 
-            if distanceToTrap <= Config.CheckRadius then
-                if Config.Debug then
-                    
-                end
+            if distanceToTrap <= Config.AnimalTrapSettings.CheckRadius then
                 break
             end
 
@@ -178,9 +350,6 @@ local function MakeAnimalMoveToTrap(animal, trapCoords, trapId)
             if distanceMoved < 0.2 then
                 stuckTimer = stuckTimer + checkInterval
                 if stuckTimer >= maxStuckTime then
-                    if Config.Debug then
-                       
-                    end
                     ClearPedTasks(animal)
                     Wait(50)
                     local offsetX = math.random(-0.3, 0.3)
@@ -201,19 +370,7 @@ local function MakeAnimalMoveToTrap(animal, trapCoords, trapId)
     end)
 
     
-    SetTimeout(60000, function()
-        if DoesEntityExist(animal) and not capturedAnimals[animal] then
-            if Config.Debug then
-                
-            end
-            spawnedAnimals[animal] = nil
-            DeleteEntity(animal)
-        end
-    end)
 end
-
-
-
 
 local function GetNearbyPeds(coords, radius)
     local peds = {}
@@ -222,13 +379,10 @@ local function GetNearbyPeds(coords, radius)
     for player = 0, 255 do
         if NetworkIsPlayerActive(player) then
             local ped = GetPlayerPed(player)
-            if DoesEntityExist(ped) and ped ~= playerPed then -- Exclude the player's ped
+            if DoesEntityExist(ped) then
                 local pedCoords = GetEntityCoords(ped)
                 if #(coords - pedCoords) <= radius then
                     table.insert(peds, ped)
-                    if Config.Debug then
-                        
-                    end
                 end
             end
         end
@@ -241,37 +395,12 @@ local function GetNearbyPeds(coords, radius)
             local animalCoords = GetEntityCoords(animal)
             if #(coords - animalCoords) <= radius then
                 table.insert(peds, animal)
-                if Config.Debug then
-                   
-                end
             end
         end
     end
     
-    if Config.Debug then
-        
-    end
     return peds
 end
-
-local function SpawnAnimalNearTrap(trapCoords, playerCoords)
-    local model = GetRandomAnimalModel()
-    RequestModel(model)
-    while not HasModelLoaded(model) do
-        Wait(10)
-    end
-
-    local spawnCoords, success = FindSafeSpawnPosition(trapCoords, playerCoords, 60.0, 40.0)
-    local animal = CreatePed(model, spawnCoords.x, spawnCoords.y, spawnCoords.z, math.random(0, 360), true, false, false, false)
-
-    if DoesEntityExist(animal) then
-        spawnedAnimals[animal] = true
-        MakeAnimalMoveToTrap(animal, trapCoords)
-    end
-
-    SetModelAsNoLongerNeeded(model)
-end
-
 
 RegisterNetEvent('rsg_beartraps:placeTrap')
 AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
@@ -287,8 +416,7 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
     end
     
     if not trapConfig then 
-       
-        exports.ox_lib:notify({ type = 'error', title = 'Error', description = 'Trap configuration not found.' })
+        ox_lib:notify({ type = 'error', title = 'Error', description = 'Trap configuration not found.' })
         return 
     end
     
@@ -301,9 +429,6 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
     
     local modelToUse = trapConfig.Model
     local modelHash = trapConfig.Model
-    if Config.Debug then
-        
-    end
 
     RequestModel(modelHash)
     local attempts = 0
@@ -316,9 +441,6 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
         if trapConfig.FallbackModel then
             modelHash = trapConfig.FallbackModel
             modelToUse = trapConfig.FallbackModel
-            if Config.Debug then
-                
-            end
             RequestModel(modelHash)
             attempts = 0
             while not HasModelLoaded(modelHash) and attempts < 500 do
@@ -326,17 +448,17 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
                 attempts = attempts + 1
             end
             if not HasModelLoaded(modelHash) then
-                exports.ox_lib:notify({ type = 'error', title = 'Error', description = 'No valid trap model available.' })
+                ox_lib:notify({ type = 'error', title = 'Error', description = 'No valid trap model available.' })
                 return
             end
         else
-            exports.ox_lib:notify({ type = 'error', title = 'Error', description = 'Invalid trap model: ' .. tostring(modelToUse) .. '. Contact server admin.' })
+            ox_lib:notify({ type = 'error', title = 'Error', description = 'Invalid trap model: ' .. tostring(modelToUse) .. '. Contact server admin.' })
             return
         end
     end
     
     local forward = GetEntityForwardVector(playerPed)
-    local offsetDistance = 3.0 -- Place trap 3 units away to prevent player getting stuck
+    local offsetDistance = 3.0
     local x = coords.x + forward.x * offsetDistance
     local y = coords.y + forward.y * offsetDistance
     local trapObj = CreateObject(modelHash, x, y, finalZ, true, false, false)
@@ -348,13 +470,27 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
     
     if not DoesEntityExist(trapObj) then
         SetModelAsNoLongerNeeded(modelHash)
-        exports.ox_lib:notify({ type = 'error', title = 'Error', description = 'Failed to create trap.' })
+        ox_lib:notify({ type = 'error', title = 'Error', description = 'Failed to create trap.' })
         return
     end
     
     PlaceObjectOnGroundProperly(trapObj)
     SetEntityHeading(trapObj, GetEntityHeading(playerPed))
     FreezeEntityPosition(trapObj, true)
+    
+    -- Play open animation on trap placement
+    if trapConfig.TrapAnimation then
+        RequestAnimDict(trapConfig.TrapAnimation.dict)
+        local animTimeout = 0
+        while not HasAnimDictLoaded(trapConfig.TrapAnimation.dict) and animTimeout < 1000 do
+            Wait(10)
+            animTimeout = animTimeout + 1
+        end
+        if HasAnimDictLoaded(trapConfig.TrapAnimation.dict) then
+            TaskPlayAnim(trapObj, trapConfig.TrapAnimation.dict, trapConfig.TrapAnimation.open_anim, 
+                        8.0, -8.0, -1, 1, 0, false, false, false)
+        end
+    end
     
     local isNetworked = false
     local trapId = trapObj
@@ -369,9 +505,6 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
             if networkId ~= 0 then
                 trapId = networkId
                 isNetworked = true
-                if Config.Debug then
-                    print("Trap networked successfully, trapId: " .. trapId)
-                end
             end
         end
     end
@@ -381,7 +514,8 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
         config = trapConfig, 
         owner = GetPlayerServerId(PlayerId()),
         coords = GetEntityCoords(trapObj),
-        isNetworked = isNetworked
+        isNetworked = isNetworked,
+        captureCount = 0
     }
     
     local collectPrompt = PromptRegisterBegin()
@@ -403,49 +537,27 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
     prompts[trapId .. '_check'] = checkPrompt
     
     SetModelAsNoLongerNeeded(modelHash)
-    if Config.Debug then
-        
-    end
     
     TriggerServerEvent('rsg_beartraps:trapPlaced', trapId, trapConfig.Item, GetEntityCoords(trapObj))
     
-    
     SetTimeout(10000, function()
-        if not DoesEntityExist(trapObj) then
-            if Config.Debug then
-               
-            end
-            return
-        end
+        if not DoesEntityExist(trapObj) then return end
         
         local playerPed = PlayerPedId()
-        if not playerPed or not DoesEntityExist(playerPed) then
-            if Config.Debug then
-               
-            end
-            return
-        end
+        if not playerPed or not DoesEntityExist(playerPed) then return end
         
         local trapCoords = GetEntityCoords(trapObj)
         local playerCoords = GetEntityCoords(playerPed)
-        
         
         local animalsToSpawn = Config.AnimalsPerTrap or 2
         local spawnDelay = Config.SpawnDelay or 2000
         
         for i = 1, animalsToSpawn do
             SetTimeout((i - 1) * spawnDelay, function()
-                if not DoesEntityExist(trapObj) then
-                    return
-                end
+                if not DoesEntityExist(trapObj) then return end
                 
                 local animalModel = GetRandomAnimalModel()
-                if not IsModelValid(animalModel) or not IsModelAPed(animalModel) then
-                    if Config.Debug then
-                        
-                    end
-                    return
-                end
+                if not IsModelValid(animalModel) or not IsModelAPed(animalModel) then return end
                 
                 RequestModel(animalModel)
                 local animalAttempts = 0
@@ -454,22 +566,11 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
                     animalAttempts = animalAttempts + 1
                 end
                 
-                if not HasModelLoaded(animalModel) then
-                    if Config.Debug then
-                       
-                    end
-                    return
-                end
+                if not HasModelLoaded(animalModel) then return end
                 
-                
-                local minDistance = Config.MinSpawnDistance or 5.0 -- Reduced from 8.0
-                local maxDistance = Config.SpawnRadius or 15.0 -- Reduced from 25.0
+                local minDistance = Config.MinSpawnDistance or 5.0
+                local maxDistance = Config.SpawnRadius or 15.0
                 local spawnPos, foundSafePos = FindSafeSpawnPosition(trapCoords, playerCoords, minDistance, maxDistance)
-                
-                if Config.Debug then
-                    
-                end
-                
                 
                 local animal = CreatePed(animalModel, spawnPos.x, spawnPos.y, spawnPos.z, math.random(0, 360), true, true)
                 local animalTimeout = 0
@@ -480,28 +581,19 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
                 
                 if not DoesEntityExist(animal) then
                     SetModelAsNoLongerNeeded(animalModel)
-                    if Config.Debug then
-                       
-                    end
                     return
                 end
                 
-                
                 spawnedAnimals[animal] = trapId
-                
-                
-                Citizen.InvokeNative(0x23f74c2fda6e7c61, -1749618580, animal) -- Set relationship group
-                Citizen.InvokeNative(0x77FF8D35EEC6BBC4, animal, 0, false)     -- Set flee attributes
+                Citizen.InvokeNative(0x23f74c2fda6e7c61, -1749618580, animal)
+                Citizen.InvokeNative(0x77FF8D35EEC6BBC4, animal, 0, false)
                 SetEntityAsMissionEntity(animal, true, true)
-                
                 
                 SetEntityVisible(animal, true)
                 SetEntityCollision(animal, true, true)
                 SetEntityCanBeDamaged(animal, true)
                 
-                
                 Wait(500)
-                
                 
                 if NetworkRegisterEntityAsNetworked(animal) then
                     local netTimeout = 0
@@ -509,27 +601,170 @@ AddEventHandler('rsg_beartraps:placeTrap', function(itemName)
                         Wait(10)
                         netTimeout = netTimeout + 1
                     end
-                    if NetworkGetEntityIsNetworked(animal) then
-                        local netId = NetworkGetNetworkIdFromEntity(animal)
-                        if Config.Debug then
-                            
-                        end
-                    end
                 end
-                
                 
                 MakeAnimalMoveToTrap(animal, trapCoords, trapId)
                 SetModelAsNoLongerNeeded(animalModel)
                 
-                if Config.Debug then
-                    local distanceFromPlayer = #(spawnPos - playerCoords)
-                   
-                end
+                -- Per-animal check thread
+                CreateThread(function()
+                    if not Config.AnimalTrapSettings then
+                        print("Error: Config.AnimalTrapSettings is not defined for animal " .. tostring(animal))
+                        return
+                    end
+                    while DoesEntityExist(animal) and not capturedAnimals[animal] and DoesEntityExist(trapObj) do
+                        Wait(1000)
+                        local animalCoords = GetEntityCoords(animal)
+                        local distance = #(animalCoords - trapCoords)
+                        if distance <= Config.AnimalTrapSettings.CheckRadius then
+                            local pedModel = GetEntityModel(animal)
+                            local canCapture, captureChance = false, Config.AnimalTrapSettings.CaptureChance
+                            
+                            for _, bait in pairs(traps[trapId].config.Baits or {}) do
+                                for _, animalType in pairs(bait.animals) do
+                                    if pedModel == GetHashKey(animalType) then
+                                        canCapture = true
+                                        captureChance = bait.chance
+                                        break
+                                    end
+                                end
+                                if canCapture then break end
+                            end
+                            
+                            if canCapture and math.random(1, 100) <= captureChance then
+                                CaptureAnimal(animal, trapId, traps[trapId])
+                                break
+                            end
+                        end
+                    end
+                end)
             end)
         end
     end)
 end)
 
+CreateThread(function()
+    while true do
+        Wait(1000) -- Check every 1 second
+        
+        if not Config.AnimalTrapSettings then
+            print("Error: Config.AnimalTrapSettings is not defined!")
+            Wait(5000)
+            return
+        end
+        
+        -- Collect trap IDs to avoid iteration issues
+        local trapIds = {}
+        for id, _ in pairs(traps) do
+            table.insert(trapIds, id)
+        end
+        
+        for _, trapId in ipairs(trapIds) do
+            local trap = traps[trapId]
+            if not trap or not DoesEntityExist(trap.obj) then
+                traps[trapId] = nil
+                print("Trap with ID " .. tostring(trapId) .. " is invalid or deleted, removing from traps table.")
+                goto continue
+            end
+            
+            local trapCoords = GetEntityCoords(trap.obj)
+            local nearbyPeds = GetNearbyPeds(trapCoords, Config.AnimalTrapSettings.CheckRadius)
+
+            for _, ped in pairs(nearbyPeds) do
+                if DoesEntityExist(ped) and not capturedAnimals[ped] then
+                    local pedModel = GetEntityModel(ped)
+                    
+                    -- Animal capture logic
+                    if IsAnimalPed(ped) then
+                        local canCapture, captureChance = false, Config.AnimalTrapSettings.CaptureChance
+                        
+                        for _, bait in pairs(trap.config.Baits or {}) do
+                            for _, animal in pairs(bait.animals) do
+                                if pedModel == GetHashKey(animal) then
+                                    canCapture = true
+                                    captureChance = bait.chance
+                                    break
+                                end
+                            end
+                            if canCapture then break end
+                        end
+                        
+                        if canCapture and math.random(1, 100) <= captureChance then
+                            CaptureAnimal(ped, trapId, trap)
+                        end
+                    
+                    -- Player capture logic
+                    elseif IsPedHuman(ped) and math.random(1, 100) <= Config.PlayerTrapSettings.TrapChance then
+                        capturedAnimals[ped] = true
+                        
+                        -- Play trap close animation
+                        if trap.config and trap.config.TrapAnimation then
+                            RequestAnimDict(trap.config.TrapAnimation.dict)
+                            local timeout = 0
+                            while not HasAnimDictLoaded(trap.config.TrapAnimation.dict) and timeout < 1000 do
+                                Wait(10)
+                                timeout = timeout + 1
+                            end
+                            if HasAnimDictLoaded(trap.config.TrapAnimation.dict) then
+                                TaskPlayAnim(trap.obj, trap.config.TrapAnimation.dict, 
+                                            trap.config.TrapAnimation.close_anim, 
+                                            8.0, -8.0, -1, 0, 0, false, false, false)
+                            else
+                                print("Failed to load animation dictionary: " .. tostring(trap.config.TrapAnimation.dict))
+                            end
+                        else
+                            print("Trap animation config missing for trap ID: " .. tostring(trapId))
+                        end
+                        
+                        -- Apply effects
+                        ApplyDamageToPed(ped, Config.PlayerTrapSettings.Damage, true)
+                        Citizen.InvokeNative(0x4102732DF6B4005F, "HitReaction", ped, 1.0)
+                        Citizen.InvokeNative(0x59BD177A1A48600A, ped, 1)
+                        
+                        -- Ragdoll player
+                        RagdollPlayer(ped, Config.PlayerTrapSettings.RagdollDuration)
+                        
+                        -- Freeze if not auto-unfreezing
+                        if not Config.PlayerTrapSettings.UnfreezeAfterRagdoll then
+                            FreezeEntityPosition(ped, true)
+                        end
+                        
+                        -- Notify server
+                        local entityId = trap.isNetworked and NetworkGetNetworkIdFromEntity(ped) or ped
+                        TriggerServerEvent('rsg_beartraps:humanTrapped', trapId, entityId)
+                        
+                        -- Release after duration
+                        SetTimeout(Config.PlayerTrapSettings.TrapDuration, function()
+                            if DoesEntityExist(ped) then
+                                FreezeEntityPosition(ped, false)
+                                if Config.PlayerTrapSettings.UnfreezeAfterRagdoll then
+                                    MakePlayerLimp(ped, Config.PlayerTrapSettings.LimpDuration)
+                                end
+                                capturedAnimals[ped] = nil
+                            end
+                            -- Reset trap to open animation
+                            if traps[trapId] and DoesEntityExist(trap.obj) and trap.config and trap.config.TrapAnimation then
+                                RequestAnimDict(trap.config.TrapAnimation.dict)
+                                local timeout = 0
+                                while not HasAnimDictLoaded(trap.config.TrapAnimation.dict) and timeout < 1000 do
+                                    Wait(10)
+                                    timeout = timeout + 1
+                                end
+                                if HasAnimDictLoaded(trap.config.TrapAnimation.dict) then
+                                    TaskPlayAnim(trap.obj, trap.config.TrapAnimation.dict, 
+                                                trap.config.TrapAnimation.open_anim, 
+                                                8.0, -8.0, -1, 1, 0, false, false, false)
+                                end
+                            end
+                        end)
+                    end
+                end
+            end
+            ::continue::
+        end
+    end
+end)
+-- Interaction thread
 CreateThread(function()
     while true do
         Wait(0)
@@ -548,6 +783,7 @@ CreateThread(function()
                     PromptSetVisible(prompts[trapId .. '_check'], true)
                     
                     if isOwner and PromptHasStandardModeCompleted(prompts[trapId .. '_collect']) then
+                        ClearPedTasks(trap.obj)
                         DeleteObject(trap.obj)
                         traps[trapId] = nil
                         PromptDelete(prompts[trapId .. '_collect'])
@@ -596,69 +832,7 @@ CreateThread(function()
     end
 end)
 
-CreateThread(function()
-    while true do
-        Wait(2000)
-        for trapId, trap in pairs(traps) do
-            if DoesEntityExist(trap.obj) then
-                local trapCoords = GetEntityCoords(trap.obj)
-                local nearbyPeds = GetNearbyPeds(trapCoords, Config.CheckRadius)
-
-                for _, ped in pairs(nearbyPeds) do
-                    if DoesEntityExist(ped) and not capturedAnimals[ped] then
-                        local pedModel = GetEntityModel(ped)
-                        if IsAnimalPed(ped) then
-                            local canCapture, captureChance = false, 0
-                            for _, bait in pairs(trap.config.Baits or {}) do
-                                for _, animal in pairs(bait.animals) do
-                                    if pedModel == GetHashKey(animal) then
-                                        canCapture = true
-                                        captureChance = bait.chance
-                                        break
-                                    end
-                                end
-                                if canCapture then break end
-                            end
-
-                            if canCapture and math.random(1, 100) <= captureChance then
-                                capturedAnimals[ped] = true
-                                spawnedAnimals[ped] = nil 
-                                FreezeEntityPosition(ped, true)
-                                local entityId = trap.isNetworked and NetworkGetNetworkIdFromEntity(ped) or ped
-                                TriggerServerEvent('rsg_beartraps:animalCaptured', trapId, pedModel, entityId)
-                                SetTimeout(trap.config.CaptureDuration * 1000, function()
-                                    if DoesEntityExist(ped) then
-                                        SetEntityHealth(ped, 0)
-                                        Wait(1000)
-                                        FreezeEntityPosition(ped, false)
-                                        capturedAnimals[ped] = nil
-                                    end
-                                end)
-                            end
-                        elseif IsPedHuman(ped) then
-                            capturedAnimals[ped] = true
-                            ApplyDamageToPed(ped, trap.config.Damage or 10, true)
-                            FreezeEntityPosition(ped, true)
-                            local entityId = trap.isNetworked and NetworkGetNetworkIdFromEntity(ped) or ped
-                            TriggerServerEvent('rsg_beartraps:humanTrapped', trapId, entityId)
-                            SetTimeout(trap.config.CaptureDuration * 1000, function()
-                                if DoesEntityExist(ped) then
-                                    SetEntityHealth(ped, 0)
-                                    Wait(1000)
-                                    FreezeEntityPosition(ped, false)
-                                    capturedAnimals[ped] = nil
-                                end
-                            end)
-                        end
-                    end
-                end
-            else
-                traps[trapId] = nil
-            end
-        end
-    end
-end)
-
+-- Cleanup on resource stop
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName then
         for _, prompt in pairs(prompts) do
@@ -668,6 +842,7 @@ AddEventHandler('onResourceStop', function(resourceName)
         end
         for _, trap in pairs(traps) do
             if DoesEntityExist(trap.obj) then
+                ClearPedTasks(trap.obj)
                 DeleteObject(trap.obj)
             end
         end
@@ -684,6 +859,7 @@ AddEventHandler('onResourceStop', function(resourceName)
     end
 end)
 
+-- Sync events
 RegisterNetEvent('rsg_beartraps:syncTrap')
 AddEventHandler('rsg_beartraps:syncTrap', function(trapData)
     if not traps[trapData.id] then
@@ -694,12 +870,29 @@ AddEventHandler('rsg_beartraps:syncTrap', function(trapData)
         end
         local trapObj = CreateObject(modelHash, trapData.coords.x, trapData.coords.y, trapData.coords.z, true, true, false)
         PlaceObjectOnGroundProperly(trapObj)
+        
+        -- Play open animation for synced trap
+        if trapData.config.TrapAnimation then
+            RequestAnimDict(trapData.config.TrapAnimation.dict)
+            local timeout = 0
+            while not HasAnimDictLoaded(trapData.config.TrapAnimation.dict) and timeout < 1000 do
+                Wait(10)
+                timeout = timeout + 1
+            end
+            if HasAnimDictLoaded(trapData.config.TrapAnimation.dict) then
+                TaskPlayAnim(trapObj, trapData.config.TrapAnimation.dict, trapData.config.TrapAnimation.open_anim, 
+                            8.0, -8.0, -1, 1, 0, false, false, false)
+            end
+        end
+        
         SetModelAsNoLongerNeeded(modelHash)
         traps[trapData.id] = {
             obj = trapObj,
             config = trapData.config,
             owner = trapData.owner,
-            coords = trapData.coords
+            coords = trapData.coords,
+            isNetworked = true,
+            captureCount = trapData.captureCount or 0
         }
     end
 end)
@@ -708,6 +901,7 @@ RegisterNetEvent('rsg_beartraps:removeTrapSync')
 AddEventHandler('rsg_beartraps:removeTrapSync', function(trapId)
     if traps[trapId] then
         if DoesEntityExist(traps[trapId].obj) then
+            ClearPedTasks(traps[trapId].obj)
             DeleteObject(traps[trapId].obj)
         end
         if prompts[trapId .. '_collect'] then
@@ -738,10 +932,10 @@ AddEventHandler('rsg_beartraps:clearAllTraps', function()
     end
     for _, trap in pairs(traps) do
         if DoesEntityExist(trap.obj) then
+            ClearPedTasks(trap.obj)
             DeleteObject(trap.obj)
         end
     end
-    -- Clean up all spawned animals
     for animal, _ in pairs(spawnedAnimals) do
         if DoesEntityExist(animal) then
             DeleteEntity(animal)
