@@ -75,29 +75,39 @@ AddEventHandler('rsg_beartraps:animalCaptured', function(trapId, animalModel, en
     
     if not Player then return end
 
-    local trapConfig = nil
-    for _, trap in pairs(Config.Traps) do
-        trapConfig = trap
-        break 
+    -- Validate trap existence
+    if not activeTrap[trapId] then
+        TriggerClientEvent('ox_lib:notify', src, { 
+            type = 'error', 
+            title = 'Error', 
+            description = 'Invalid trap ID.' 
+        })
+        return
     end
 
-    if not trapConfig then return end
+    -- Notify player that the animal is bleeding out
+    TriggerClientEvent('ox_lib:notify', src, { 
+        type = 'warning', 
+        title = 'Animal Trapped', 
+        description = 'An animal is caught in your trap and is bleeding out!' 
+    })
 
-    
+    -- Simulate bleeding out with a delay before confirming the capture
+    Citizen.Wait(5000) -- 5-second delay to simulate bleeding out (adjust as needed)
+
+    -- Notify player of successful capture (animal has "died")
     TriggerClientEvent('ox_lib:notify', src, { 
         type = 'success', 
         title = 'Trap Success', 
-        description = 'You caught an animal!' 
+        description = 'You caught an animal! It has died.' 
     })
 
-   
-    if not activeTrap[trapId] then
-        activeTrap[trapId] = { captures = 0, owner = src }
-    end
+    -- Increment capture count
     activeTrap[trapId].captures = activeTrap[trapId].captures + 1
 
-    
-    if activeTrap[trapId].captures >= 3 then
+    -- Check if trap should break (after max captures)
+    local maxCaptures = Config.MaxCaptures or 3 -- Use Config or default to 3
+    if activeTrap[trapId].captures >= maxCaptures then
         TriggerClientEvent('rsg_beartraps:removeTrapSync', -1, trapId)
         activeTrap[trapId] = nil
         TriggerClientEvent('ox_lib:notify', src, { 
@@ -114,44 +124,31 @@ RegisterNetEvent('rsg_beartraps:humanTrapped')
 AddEventHandler('rsg_beartraps:humanTrapped', function(trapId, entityId)
     local src = source
     
+    -- The player who stepped on the trap is the one triggering this event
+    local victimSrc = src
     
-    local victimSrc = nil
+    -- Notify the victim
+    TriggerClientEvent('ox_lib:notify', victimSrc, { 
+        type = 'error', 
+        title = 'Trapped!', 
+        description = 'You stepped on a bear trap!' 
+    })
     
-    if type(entityId) == "number" and entityId > 65536 then
+    -- Find the trap owner and notify them
+    local trapData = activeTrap[trapId]
+    if trapData and trapData.owner then
+        local trapOwner = trapData.owner
         
-        local victim = NetworkGetEntityFromNetworkId(entityId)
-        if victim and DoesEntityExist(victim) then
-            victimSrc = NetworkGetEntityOwner(victim)
-        end
-    else
-        
-        for i = 0, 255 do
-            if NetworkIsPlayerActive(i) then
-                local playerPed = GetPlayerPed(i)
-                if playerPed == entityId then
-                    victimSrc = i
-                    break
-                end
-            end
-        end
-    end
-    
-    if victimSrc and victimSrc ~= 0 then
-        TriggerClientEvent('ox_lib:notify', victimSrc, { 
-            type = 'error', 
-            title = 'Trapped!', 
-            description = 'You stepped on a bear trap!' 
-        })
-        
-        
-        if victimSrc ~= src then
-            TriggerClientEvent('ox_lib:notify', src, { 
+        if trapOwner ~= victimSrc then
+            -- Different player stepped on the trap
+            TriggerClientEvent('ox_lib:notify', trapOwner, { 
                 type = 'info', 
                 title = 'Trap Triggered', 
                 description = 'Someone stepped on your trap!' 
             })
         else
-            TriggerClientEvent('ox_lib:notify', src, { 
+            -- Owner stepped on their own trap
+            TriggerClientEvent('ox_lib:notify', trapOwner, { 
                 type = 'warning', 
                 title = 'Own Trap!', 
                 description = 'You stepped on your own trap!' 
